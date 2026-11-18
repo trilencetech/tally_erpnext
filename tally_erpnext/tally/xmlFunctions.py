@@ -3,24 +3,38 @@ import frappe
 from lxml import etree as ET
 
 class TallyClient:
-    def __init__(self, tally_url="http://localhost", tally_port=9000, timeout=30):
+    def __init__(self, tally_url="http://localhost", tally_port=9000, timeout=30,
+                 relay_base_url=None, agent_id=None, api_key=None):
         """
-        Initialize TallyClient with server URL and port
+        Initialize TallyClient with either a direct host:port (same-network
+        Tally) or a TallyBridge relay (agent_id + api_key) - see
+        apps/tally_erpnext/TALLYBRIDGE.md. When relay_base_url/agent_id are
+        given, every request goes through the relay instead of tally_url:tally_port.
 
         Args:
-            tally_url (str): Tally server URL
-            tally_port (int): Tally server port
+            tally_url (str): Tally server URL (direct mode only)
+            tally_port (int): Tally server port (direct mode only)
             timeout (int): Request timeout in seconds (default: 30)
+            relay_base_url (str): TallyBridge relay base URL, e.g.
+                https://nodejsclusters-210330-0.cloudclusters.net
+            agent_id (str): This client's TallyBridge agent id
+            api_key (str): This client's TallyBridge API key
         """
         self.tally_url = tally_url
         self.tally_port = tally_port
         self.timeout = timeout
         self.endpoint = f"{tally_url}:{tally_port}"
         self.last_xml_request = None
-        
+
+        self.relay_base_url = (relay_base_url or "").rstrip("/")
+        self.agent_id = agent_id
+        self.api_key = api_key
+        self.use_relay = bool(self.relay_base_url and self.agent_id and self.api_key)
+
     def _send_request(self, xml_request):
         """
-        Send XML request to Tally server
+        Send XML request to Tally - via the TallyBridge relay when configured,
+        else directly to self.endpoint.
 
         Args:
             xml_request (str): XML request string
@@ -28,46 +42,86 @@ class TallyClient:
         Returns:
             str: XML response from Tally
         """
-        try:
-            # Store the request for debugging
-            self.last_xml_request = xml_request
+        self.last_xml_request = xml_request
 
-            # Log the request
-            frappe.logger("tally").info(f"Tally Request to {self.endpoint}:")
+        if self.use_relay:
+            url = f"{self.relay_base_url}/tally/{self.agent_id}"
+            headers = {
+                "Content-Type": "text/xml; charset=utf-8",
+                "X-API-Key": self.api_key,
+                "X-Timeout": str(self.timeout),
+            }
+        else:
+            url = self.endpoint
+            headers = {}
+
+        try:
+            frappe.logger("tally").info(f"Tally Request to {url}:")
             frappe.logger("tally").info(f"Request XML:\n{xml_request}")
 
-            response = requests.post(self.endpoint, data=xml_request, timeout=self.timeout)
+            response = requests.post(
+                url, data=xml_request.encode("utf-8"), headers=headers,
+                timeout=self.timeout + (15 if self.use_relay else 0),
+            )
 
-            # Log the response - FULL response since it's going to file
             frappe.logger("tally").info(f"Tally Response Status: {response.status_code}")
             frappe.logger("tally").info(f"Response XML (FULL):\n{response.text}")
 
             if response.status_code == 200:
                 return response.text
+
+            if self.use_relay:
+                # Relay-specific statuses carry a JSON body describing exactly
+                # what went wrong - see TALLYBRIDGE.md section 1. None of
+                # these should be retried automatically for an Import request.
+                if response.status_code == 401:
+                    error_msg = "Error: Invalid TallyBridge API key - check Tally Settings."
+                elif response.status_code == 403:
+                    error_msg = "Error: This API key is not authorised for this agent."
+                elif response.status_code == 503:
+                    error_msg = "Error: Tally/agent is offline - the client PC may be off or TallyPrime closed."
+                elif response.status_code == 504:
+                    error_msg = "Error: Tally request timed out - the client PC is slow to respond."
+                elif response.status_code == 502:
+                    error_msg = "Error: Lost connection to the client PC mid-request."
+                else:
+                    error_msg = f"Error: HTTP {response.status_code} - {response.text[:300]}"
             else:
                 error_msg = f"Error: HTTP {response.status_code}"
-                frappe.logger("tally").error(error_msg)
-                frappe.logger("tally").error(f"Response Body:\n{response.text}")
-                return error_msg
+
+            frappe.logger("tally").error(error_msg)
+            frappe.logger("tally").error(f"Response Body:\n{response.text}")
+            return error_msg
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             frappe.logger("tally").error(f"Tally Request Exception: {error_msg}")
             frappe.logger("tally").error(f"Request was:\n{xml_request}")
             return error_msg
-    
+
     def test_connection(self):
         """
-        Test connection to Tally server
-        
+        Test connection to Tally - via the relay's health/agent-status
+        endpoints when configured, else a bare POST to the direct endpoint.
+
         Returns:
             bool: True if connection successful, False otherwise
         """
         try:
+            if self.use_relay:
+                resp = requests.get(
+                    f"{self.relay_base_url}/tally-agents",
+                    headers={"X-API-Key": self.api_key}, timeout=15,
+                )
+                if resp.status_code != 200:
+                    return False
+                agents = resp.json()
+                return any(a.get("agent_id") == self.agent_id and a.get("tally_alive") for a in agents)
             response = requests.post(self.endpoint, data="")
             return response.status_code == 200
-        except:
+        except Exception:
             return False
-            
+
+
     def get_current_company(self):
         """
         Get current company name from Tally
@@ -1726,6 +1780,241 @@ class TallyClient:
     </BODY>
 </ENVELOPE>"""
         
+        return self._send_request(xml_request)
+
+    def create_sales_voucher(self, company_name, party_ledger_name, entries, date=None,
+                              voucher_number=None, narration="", reference=None,
+                              inventory_entries=None, party_name=None, party_gstin=None,
+                              party_address=None, party_country="India", place_of_supply=None,
+                              gst_registration_type="Regular", action="Create", master_id=None):
+        """
+        Create (or, with action="Alter", update) a Sales voucher in Tally
+        (VCHTYPE="Sales") - unlike
+        create_journal_voucher, the party ledger is passed separately
+        (PARTYLEDGERNAME) and added automatically as the debit entry. Buyer
+        details (name/GSTIN/address/state/country) are sent explicitly here,
+        straight from the caller's own party master data, rather than relying
+        on Tally to pull them from the Ledger master - omitting PARTYNAME
+        specifically was found to blank the printed buyer name entirely
+        (Tally's GST invoice print format reads it from this field, not by
+        re-resolving PARTYLEDGERNAME), so once any of these is sent, send all
+        of them.
+
+        Args:
+            company_name (str): Name of the company
+            party_ledger_name (str): Customer ledger name - the Dr side
+            entries (list): List of dicts for the Cr side ledgers that are
+                            NOT stock-item-linked (tax ledgers - CGST/SGST/IGST):
+                            - ledger_name (str)
+                            - amount (float, positive)
+                            - is_debit (bool, normally False for every entry here)
+            date (str, optional): Voucher date in format YYYYMMDD. Default: Today
+            voucher_number (str, optional): Voucher number. Default: None (auto-generated)
+            narration (str, optional): Narration for the voucher. Default: ""
+            reference (str, optional): Reference number (e.g. Bill No). Default: None
+            inventory_entries (list, optional): one dict per Description-of-Goods
+                line (a GST Item Invoice). The Stock Item master is
+                auto-created inline (same request) if it doesn't already
+                exist in Tally - no pre-creation needed:
+                            - stock_item_name (str)
+                            - sales_ledger (str) - accounting allocation for this line
+                            - qty (float), rate (float), amount (float, positive)
+                            - unit (str, optional, default "Nos")
+                            - hsn_code (str, optional)
+                            - description_lines (list[str], optional) - extra
+                              lines shown under the bold item name on the printed invoice
+            party_name (str, optional): Printed buyer name (PARTYNAME) - defaults
+                to party_ledger_name if not given
+            party_gstin (str, optional): Buyer's GSTIN
+            party_address (str, optional): Buyer's address, newline-separated
+            party_country (str, optional): Default "India"
+            place_of_supply (str, optional): State name for PLACEOFSUPPLY/STATENAME
+            gst_registration_type (str, optional): Default "Regular"
+            action (str, optional): "Create" (default) or "Alter" to update an
+                existing voucher.
+            master_id (str, optional): Tally's own internal voucher ID
+                (LASTVCHID from a prior create's response) - required for
+                action="Alter" to actually target that voucher. Matching by
+                VOUCHERTYPENAME + VOUCHERNUMBER alone does NOT work - Tally
+                creates a second, duplicate voucher with the same number
+                instead of updating the first one.
+
+        Returns:
+            str: XML response confirming creation/update
+        """
+        if not date:
+            from datetime import datetime
+            date = datetime.now().strftime("%Y%m%d")
+
+        voucher_number_element = f"<VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>" if voucher_number else ""
+        reference_element = f"<REFERENCE>{reference}</REFERENCE>" if reference else ""
+        inventory_entries = inventory_entries or []
+
+        # party ledger carries the full voucher value (tax entries + every
+        # inventory line's amount), opposite sign to the sum of everything
+        # else - same debit/credit sign convention as create_journal_voucher
+        # (debit = negative AMOUNT, ISDEEMEDPOSITIVE=Yes)
+        total = sum(float(entry.get('amount', 0)) for entry in entries)
+        total += sum(float(inv.get('amount', 0)) for inv in inventory_entries)
+
+        bill_ref = reference or voucher_number or ""
+        bill_allocation_xml = f"""<BILLALLOCATIONS.LIST>
+                    <NAME>{bill_ref}</NAME>
+                    <BILLTYPE>New Ref</BILLTYPE>
+                    <AMOUNT>{-total}</AMOUNT>
+                </BILLALLOCATIONS.LIST>""" if bill_ref else ""
+
+        # An Item Invoice (ISINVOICE=Yes, with ALLINVENTORYENTRIES.LIST) needs
+        # its voucher-level party/tax entries tagged LEDGERENTRIES.LIST, not
+        # ALLLEDGERENTRIES.LIST (that tag is for a plain accounting voucher
+        # with no inventory) - matches book_print_flow/tally_export.py,
+        # which imports successfully into the same Tally.
+        ledger_tag = "LEDGERENTRIES.LIST" if inventory_entries else "ALLLEDGERENTRIES.LIST"
+
+        ledger_entries = [f"""<{ledger_tag}>
+                <LEDGERNAME>{party_ledger_name}</LEDGERNAME>
+                <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                <AMOUNT>{-total}</AMOUNT>
+                {bill_allocation_xml}
+            </{ledger_tag}>"""]
+
+        for entry in entries:
+            is_debit = entry.get('is_debit', False)
+            is_deemed_positive = "Yes" if is_debit else "No"
+            amount = float(entry.get('amount', 0))
+            amount_value = -amount if is_debit else amount
+
+            ledger_entries.append(f"""<{ledger_tag}>
+                <LEDGERNAME>{entry.get('ledger_name', '')}</LEDGERNAME>
+                <ISDEEMEDPOSITIVE>{is_deemed_positive}</ISDEEMEDPOSITIVE>
+                <AMOUNT>{amount_value}</AMOUNT>
+            </{ledger_tag}>""")
+
+        ledger_entries_xml = "\n".join(ledger_entries)
+
+        inventory_blocks = []
+        for inv in inventory_entries:
+            qty = float(inv.get('qty', 0))
+            rate = float(inv.get('rate', 0))
+            amount = float(inv.get('amount', 0))
+            unit = inv.get('unit', 'Nos')
+            description_lines = inv.get('description_lines') or []
+            description_xml = "\n".join(
+                f"<BASICUSERDESCRIPTION>{line}</BASICUSERDESCRIPTION>" for line in description_lines
+            )
+            inventory_blocks.append(f"""<ALLINVENTORYENTRIES.LIST>
+                <STOCKITEMNAME>{inv.get('stock_item_name', '')}</STOCKITEMNAME>
+                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+                <ISAUTONEGATE>No</ISAUTONEGATE>
+                <BASICUSERDESCRIPTION.LIST TYPE="String">
+                    {description_xml}
+                </BASICUSERDESCRIPTION.LIST>
+                <RATE>{rate}/{unit}</RATE>
+                <AMOUNT>{amount}</AMOUNT>
+                <ACTUALQTY>{qty} {unit}</ACTUALQTY>
+                <BILLEDQTY>{qty} {unit}</BILLEDQTY>
+                <ACCOUNTINGALLOCATIONS.LIST>
+                    <LEDGERNAME>{inv.get('sales_ledger', '')}</LEDGERNAME>
+                    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                    <AMOUNT>{amount}</AMOUNT>
+                </ACCOUNTINGALLOCATIONS.LIST>
+            </ALLINVENTORYENTRIES.LIST>""")
+
+        inventory_entries_xml = "\n".join(inventory_blocks)
+        is_invoice = "Yes" if inventory_entries else "No"
+        persisted_view = "Invoice Voucher View" if inventory_entries else "Accounting Voucher View"
+
+        # Auto-create any Stock Item masters the inventory lines reference,
+        # inline in the same request, one TALLYMESSAGE per master, before the
+        # voucher's own TALLYMESSAGE - same technique as book_print_flow's
+        # tally_export.py. Tally's XML import treats ACTION="Create" on a
+        # master whose name already exists as a no-op/update, so this is
+        # safe to send unconditionally without checking Tally first.
+        seen_units = set()
+        master_messages = []
+        for inv in inventory_entries:
+            stock_item_name = inv.get('stock_item_name', '')
+            item_unit = inv.get('unit', 'Nos')
+            if item_unit not in seen_units:
+                seen_units.add(item_unit)
+                master_messages.append(f"""<TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <UNIT NAME="{item_unit}" RESERVEDNAME="">
+                        <NAME>{item_unit}</NAME>
+                        <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+                    </UNIT>
+                </TALLYMESSAGE>""")
+            master_messages.append(f"""<TALLYMESSAGE xmlns:UDF="TallyUDF">
+                <STOCKITEM NAME="{stock_item_name}" ACTION="Create" RESERVEDNAME="">
+                    <NAME>{stock_item_name}</NAME>
+                    <BASEUNITS>{item_unit}</BASEUNITS>
+                </STOCKITEM>
+            </TALLYMESSAGE>""")
+        master_messages_xml = "\n".join(master_messages)
+
+        # Buyer details, sent explicitly from the caller's own party master
+        # data - printing the party's name specifically depends on PARTYNAME
+        # being set (Tally's GST invoice format reads it from here, not by
+        # re-resolving PARTYLEDGERNAME). No separate Consignee block is sent:
+        # there's no real ship-to party distinct from the buyer in this flow,
+        # and sending an identical Consignee block caused Tally's print to
+        # show the address under "Consignee" instead of "Buyer".
+        printed_party_name = party_name or party_ledger_name
+        address_lines = [ln.strip() for ln in (party_address or "").splitlines() if ln.strip()]
+        buyer_address_xml = "\n".join(
+            f'<BASICBUYERADDRESS.LIST TYPE="String"><BASICBUYERADDRESS>{line}</BASICBUYERADDRESS></BASICBUYERADDRESS.LIST>'
+            for line in address_lines
+        )
+        party_gstin_xml = f"<PARTYGSTIN>{party_gstin}</PARTYGSTIN>" if party_gstin else ""
+        place_of_supply_xml = (
+            f"<PLACEOFSUPPLY>{place_of_supply}</PLACEOFSUPPLY><STATENAME>{place_of_supply}</STATENAME>"
+            if place_of_supply else ""
+        )
+        master_id_xml = f"<MASTERID>{master_id}</MASTERID>" if master_id else ""
+
+        xml_request = f"""<ENVELOPE>
+    <HEADER>
+        <TALLYREQUEST>Import Data</TALLYREQUEST>
+    </HEADER>
+    <BODY>
+        <IMPORTDATA>
+            <REQUESTDESC>
+                <REPORTNAME>Vouchers</REPORTNAME>
+                <STATICVARIABLES>
+                    <SVCURRENTCOMPANY>{company_name}</SVCURRENTCOMPANY>
+                </STATICVARIABLES>
+            </REQUESTDESC>
+            <REQUESTDATA>
+                {master_messages_xml}
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <VOUCHER VCHTYPE="Sales" ACTION="{action}">
+                        {master_id_xml}
+                        <DATE>{date}</DATE>
+                        <EFFECTIVEDATE>{date}</EFFECTIVEDATE>
+                        <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+                        <PARTYLEDGERNAME>{party_ledger_name}</PARTYLEDGERNAME>
+                        <PARTYNAME>{printed_party_name}</PARTYNAME>
+                        {party_gstin_xml}
+                        {buyer_address_xml}
+                        <COUNTRYOFRESIDENCE>{party_country}</COUNTRYOFRESIDENCE>
+                        {place_of_supply_xml}
+                        <GSTREGISTRATIONTYPE>{gst_registration_type}</GSTREGISTRATIONTYPE>
+                        {voucher_number_element}
+                        {reference_element}
+                        <NARRATION>{narration}</NARRATION>
+                        <ISINVOICE>{is_invoice}</ISINVOICE>
+                        <ISDELETED>No</ISDELETED>
+                        <ISCANCELLED>No</ISCANCELLED>
+                        <PERSISTEDVIEW>{persisted_view}</PERSISTEDVIEW>
+                        {ledger_entries_xml}
+                        {inventory_entries_xml}
+                    </VOUCHER>
+                </TALLYMESSAGE>
+            </REQUESTDATA>
+        </IMPORTDATA>
+    </BODY>
+</ENVELOPE>"""
+
         return self._send_request(xml_request)
 
     def update_voucher(self, company_name, master_id, narration=None, voucher_type=None):

@@ -10,10 +10,15 @@ frappe.ui.form.on("Tally Settings", {
 	},
 
 	test_connection(frm) {
+		if (!frm.doc.customer) {
+			frappe.msgprint(__("Set Customer and save before testing the connection."));
+			return;
+		}
 		// Test connection to Tally server
 		frappe.call({
 			method: "tally_erpnext.tally.test_tally_connection",
 			args: {
+				customer: frm.doc.customer,
 				host: frm.doc.host,
 				port: frm.doc.port
 			},

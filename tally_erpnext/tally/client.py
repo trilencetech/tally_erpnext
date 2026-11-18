@@ -15,18 +15,41 @@ class TallyClient:
 	Wrapper class for TallyClient that integrates with Frappe's settings and error handling.
 	"""
 
-	def __init__(self, host=None, port=None, timeout=30):
+	def __init__(self, customer, host=None, port=None, timeout=30):
 		"""
-		Initialize Tally Client with settings from Frappe
+		Initialize Tally Client for one client (Customer). tally_erpnext is a
+		central connector shared by every client - each Customer has its own
+		Tally Settings row (own TallyBridge agent/API key, since each client's
+		Tally runs on their own PC) - see apps/tally_erpnext/TALLYBRIDGE.md.
+		There is deliberately no default customer: silently falling back to
+		one client's settings would risk pushing another client's data to the
+		wrong Tally.
 
 		Args:
-			host: Tally server host (defaults to settings or localhost)
-			port: Tally server port (defaults to settings or 9000)
+			customer: Customer (client) this request is for - required
+			host: Tally server host (direct mode only; defaults to settings or localhost)
+			port: Tally server port (direct mode only; defaults to settings or 9000)
 			timeout: Request timeout in seconds (defaults to 30)
 		"""
-		# Get settings from Tally Settings doctype if not provided
-		if not host or not port:
-			settings = self.get_tally_settings()
+		if not customer:
+			frappe.throw(_("TallyClient requires a Customer - tally_erpnext holds one Tally Settings row per client."))
+
+		self.customer = customer
+		settings = self.get_tally_settings(customer)
+		self.default_company = settings.get("default_company")
+		relay_kwargs = {}
+
+		if settings.get("connection_mode", "Relay (TallyBridge)") == "Relay (TallyBridge)":
+			if not (settings.get("agent_id") and settings.get("api_key")):
+				frappe.throw(_("Tally Settings: Agent ID and API Key are required for Relay (TallyBridge) mode."))
+			relay_kwargs = {
+				"relay_base_url": settings.get("relay_base_url"),
+				"agent_id": settings.get("agent_id"),
+				"api_key": settings.get("api_key"),
+			}
+			host = host or "http://localhost"
+			port = port or 9000
+		else:
 			host = host or settings.get("host", "localhost")
 			port = port or settings.get("port", 9000)
 
@@ -37,30 +60,37 @@ class TallyClient:
 			tally_url = host
 
 		try:
-			self.client = BaseTallyClient(tally_url=tally_url, tally_port=int(port), timeout=timeout)
+			self.client = BaseTallyClient(
+				tally_url=tally_url, tally_port=int(port), timeout=timeout, **relay_kwargs
+			)
 		except Exception as e:
 			frappe.throw(_("Failed to initialize Tally Client: {0}").format(str(e)))
 
 	@staticmethod
-	def get_tally_settings():
+	def get_tally_settings(customer):
 		"""
-		Get Tally integration settings from Frappe
+		Get this Customer's Tally Settings row
+
+		Args:
+			customer: Customer (client) name
 
 		Returns:
-			dict: Tally settings
+			dict: Tally settings for this customer
 		"""
-		try:
-			if frappe.db.exists("Tally Settings", "Tally Settings"):
-				settings = frappe.get_doc("Tally Settings", "Tally Settings")
-				return {
-					"host": settings.host or "localhost",
-					"port": settings.port or 9000,
-					"enabled": settings.enabled,
-				}
-		except Exception:
-			pass
+		if not frappe.db.exists("Tally Settings", customer):
+			frappe.throw(_("No Tally Settings found for Customer {0} - create one first.").format(customer))
 
-		return {"host": "localhost", "port": 9000, "enabled": False}
+		settings = frappe.get_doc("Tally Settings", customer)
+		return {
+			"host": settings.host or "localhost",
+			"port": settings.port or 9000,
+			"enabled": settings.enabled,
+			"connection_mode": settings.connection_mode or "Relay (TallyBridge)",
+			"relay_base_url": settings.relay_base_url,
+			"agent_id": settings.agent_id,
+			"api_key": settings.get_password("api_key") if settings.api_key else None,
+			"default_company": settings.default_company,
+		}
 
 	def get_last_xml_request(self):
 		"""Proxy to get the last XML request sent to Tally"""
@@ -394,8 +424,7 @@ class TallyClient:
 		"""
 		try:
 			if not company_name:
-				settings = self.get_tally_settings()
-				company_name = settings.get("default_company", "")
+				company_name = self.default_company or ""
 
 			# Use the new get_vouchers_list function (no date filter if not provided)
 			xml_response = self.client.get_vouchers_list(
@@ -485,6 +514,16 @@ class TallyClient:
 		try:
 			company_name = kwargs.get('company_name')
 			voucher_number = kwargs.get('voucher_number')
+			reference = kwargs.get('reference')
+			inventory_entries = kwargs.get('inventory_entries')
+			party_name = kwargs.get('party_name')
+			party_gstin = kwargs.get('party_gstin')
+			party_address = kwargs.get('party_address')
+			party_country = kwargs.get('party_country') or 'India'
+			place_of_supply = kwargs.get('place_of_supply')
+			gst_registration_type = kwargs.get('gst_registration_type') or 'Regular'
+			action = kwargs.get('action') or 'Create'
+			master_id = kwargs.get('master_id')
 
 			if voucher_type.lower() == 'journal':
 				xml_response = self.client.create_journal_voucher(
@@ -505,6 +544,32 @@ class TallyClient:
 					date=date,
 					narration=narration or "",
 					voucher_number=voucher_number
+				)
+			elif voucher_type.lower() == 'sales':
+				# Party is whichever entry is the debit side; every other
+				# entry (Sales account, CGST/SGST/IGST, ...) goes on the credit side
+				party_ledger = next((e['ledger_name'] for e in ledger_entries if e.get('is_debit')), None)
+				if not party_ledger:
+					frappe.throw(_("A Sales voucher needs exactly one debit (party) ledger entry."))
+				credit_entries = [e for e in ledger_entries if not e.get('is_debit')]
+
+				xml_response = self.client.create_sales_voucher(
+					company_name=company_name,
+					party_ledger_name=party_ledger,
+					entries=credit_entries,
+					date=date,
+					voucher_number=voucher_number,
+					narration=narration or "",
+					reference=reference,
+					inventory_entries=inventory_entries,
+					party_name=party_name,
+					party_gstin=party_gstin,
+					party_address=party_address,
+					party_country=party_country,
+					place_of_supply=place_of_supply,
+					gst_registration_type=gst_registration_type,
+					action=action,
+					master_id=master_id
 				)
 			else:
 				frappe.throw(_("Voucher type {0} not yet supported").format(voucher_type))
@@ -562,19 +627,20 @@ class TallyClient:
 
 
 @frappe.whitelist()
-def test_tally_connection(host=None, port=None):
+def test_tally_connection(customer, host=None, port=None):
 	"""
 	Test connection to Tally server (whitelisted for API access)
 
 	Args:
-		host: Tally server host
-		port: Tally server port
+		customer: Customer (client) this connection belongs to
+		host: Tally server host (Direct mode only)
+		port: Tally server port (Direct mode only)
 
 	Returns:
 		dict: Connection status
 	"""
 	try:
-		client = TallyClient(host=host, port=port)
+		client = TallyClient(customer=customer, host=host, port=port)
 		if client.test_connection():
 			return {
 				"success": True,

@@ -3,6 +3,10 @@ Tally API Endpoints
 
 This module provides whitelisted API endpoints for Tally integration operations
 that can be called from the frontend or external systems.
+
+tally_erpnext is a central connector shared by every client, so every call
+needs a `tenant`: the Customer record identifying which client's Tally
+(TallyBridge agent/API key, see Tally Settings) the request is for.
 """
 
 import frappe
@@ -11,7 +15,7 @@ from tally_erpnext.tally.client import TallyClient
 
 
 @frappe.whitelist()
-def get_companies():
+def get_companies(tenant):
 	"""
 	Get list of all companies from Tally
 
@@ -19,7 +23,7 @@ def get_companies():
 		list: List of company dictionaries
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		companies = client.get_companies()
 		return {"success": True, "data": companies}
 	except Exception as e:
@@ -28,7 +32,7 @@ def get_companies():
 
 
 @frappe.whitelist()
-def get_current_company():
+def get_current_company(tenant):
 	"""
 	Get current company information from Tally
 
@@ -36,7 +40,7 @@ def get_current_company():
 		dict: Company information
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		company = client.get_current_company()
 		return {"success": True, "data": company}
 	except Exception as e:
@@ -45,7 +49,7 @@ def get_current_company():
 
 
 @frappe.whitelist()
-def get_ledgers(company=None):
+def get_ledgers(tenant, company=None):
 	"""
 	Get all ledgers from Tally
 
@@ -56,7 +60,7 @@ def get_ledgers(company=None):
 		dict: Response with ledgers list
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		ledgers = client.get_ledgers(company=company)
 		return {"success": True, "data": ledgers}
 	except Exception as e:
@@ -65,7 +69,7 @@ def get_ledgers(company=None):
 
 
 @frappe.whitelist()
-def create_ledger(name, parent, address=None, mobile=None, email=None):
+def create_ledger(tenant, name, parent, address=None, mobile=None, email=None):
 	"""
 	Create a new ledger in Tally
 
@@ -80,7 +84,7 @@ def create_ledger(name, parent, address=None, mobile=None, email=None):
 		dict: Response with creation status
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		response = client.create_ledger(
 			name=name,
 			parent=parent,
@@ -95,7 +99,7 @@ def create_ledger(name, parent, address=None, mobile=None, email=None):
 
 
 @frappe.whitelist()
-def get_stock_items(company=None):
+def get_stock_items(tenant, company=None):
 	"""
 	Get all stock items from Tally
 
@@ -106,7 +110,7 @@ def get_stock_items(company=None):
 		dict: Response with stock items list
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		items = client.get_stock_items(company=company)
 		return {"success": True, "data": items}
 	except Exception as e:
@@ -115,7 +119,7 @@ def get_stock_items(company=None):
 
 
 @frappe.whitelist()
-def create_stock_item(name, category, unit):
+def create_stock_item(tenant, name, category, unit):
 	"""
 	Create a new stock item in Tally
 
@@ -128,7 +132,7 @@ def create_stock_item(name, category, unit):
 		dict: Response with creation status
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		response = client.create_stock_item(name=name, category=category, unit=unit)
 		return {"success": True, "data": response}
 	except Exception as e:
@@ -137,7 +141,7 @@ def create_stock_item(name, category, unit):
 
 
 @frappe.whitelist()
-def get_vouchers(voucher_type=None, from_date=None, to_date=None):
+def get_vouchers(tenant, voucher_type=None, from_date=None, to_date=None):
 	"""
 	Get vouchers from Tally
 
@@ -150,7 +154,7 @@ def get_vouchers(voucher_type=None, from_date=None, to_date=None):
 		dict: Response with vouchers list
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		vouchers = client.get_vouchers(
 			voucher_type=voucher_type,
 			from_date=from_date,
@@ -163,7 +167,7 @@ def get_vouchers(voucher_type=None, from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def create_voucher(voucher_type, date, ledger_entries, narration=None):
+def create_voucher(tenant, voucher_type, date, ledger_entries, narration=None):
 	"""
 	Create a voucher in Tally
 
@@ -183,7 +187,7 @@ def create_voucher(voucher_type, date, ledger_entries, narration=None):
 		if isinstance(ledger_entries, str):
 			ledger_entries = json.loads(ledger_entries)
 
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		response = client.create_voucher(
 			voucher_type=voucher_type,
 			date=date,
@@ -197,7 +201,7 @@ def create_voucher(voucher_type, date, ledger_entries, narration=None):
 
 
 @frappe.whitelist()
-def get_groups(group_type="Ledger"):
+def get_groups(tenant, group_type="Ledger"):
 	"""
 	Get groups from Tally
 
@@ -208,7 +212,7 @@ def get_groups(group_type="Ledger"):
 		dict: Response with groups list
 	"""
 	try:
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		groups = client.get_groups(group_type=group_type)
 		return {"success": True, "data": groups}
 	except Exception as e:
@@ -217,7 +221,7 @@ def get_groups(group_type="Ledger"):
 
 
 @frappe.whitelist()
-def sync_customers_from_tally():
+def sync_customers_from_tally(tenant):
 	"""
 	Sync customers from Tally to ERPNext
 
@@ -226,7 +230,7 @@ def sync_customers_from_tally():
 	"""
 	try:
 		from tally_erpnext.tally.utils import sync_customers
-		result = sync_customers()
+		result = sync_customers(tenant)
 		return {"success": True, "data": result}
 	except Exception as e:
 		frappe.log_error(message=str(e), title=_("Tally API Error - Sync Customers"))
@@ -234,7 +238,7 @@ def sync_customers_from_tally():
 
 
 @frappe.whitelist()
-def sync_items_from_tally():
+def sync_items_from_tally(tenant):
 	"""
 	Sync items from Tally to ERPNext
 
@@ -243,7 +247,7 @@ def sync_items_from_tally():
 	"""
 	try:
 		from tally_erpnext.tally.utils import sync_items
-		result = sync_items()
+		result = sync_items(tenant)
 		return {"success": True, "data": result}
 	except Exception as e:
 		frappe.log_error(message=str(e), title=_("Tally API Error - Sync Items"))
@@ -251,19 +255,20 @@ def sync_items_from_tally():
 
 
 @frappe.whitelist()
-def push_sales_invoice_to_tally(sales_invoice_name):
+def push_sales_invoice_to_tally(sales_invoice_name, tenant):
 	"""
 	Push a Sales Invoice from ERPNext to Tally
 
 	Args:
 		sales_invoice_name: Name of the Sales Invoice document
+		tenant: Customer record identifying which client's Tally to push to
 
 	Returns:
 		dict: Response with push status
 	"""
 	try:
 		from tally_erpnext.tally.utils import push_sales_invoice
-		result = push_sales_invoice(sales_invoice_name)
+		result = push_sales_invoice(sales_invoice_name, tenant)
 		return {"success": True, "data": result}
 	except Exception as e:
 		frappe.log_error(message=str(e), title=_("Tally API Error - Push Sales Invoice"))

@@ -5,6 +5,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "tenant",
   "voucher_type",
   "voucher_number",
   "date",
@@ -36,6 +37,16 @@
   "voucher_data"
  ],
  "fields": [
+  {
+   "fieldname": "tenant",
+   "fieldtype": "Link",
+   "label": "Tenant (Tally Client)",
+   "options": "Customer",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "reqd": 1,
+   "description": "Which client this voucher's Tally belongs to - picks the Tally Settings row (TallyBridge agent/API key) used on sync."
+  },
   {
    "fieldname": "voucher_type",
    "fieldtype": "Select",

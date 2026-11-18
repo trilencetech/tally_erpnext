@@ -3,6 +3,13 @@ DocType Synchronization Module
 
 This module handles synchronization between Tally DocTypes and Tally software.
 It provides functions to sync data in both directions and log all operations.
+
+tally_erpnext is a central connector shared by every client, so every sync
+function takes a `tenant`: the Customer record identifying which client's
+Tally (TallyBridge agent/API key) to talk to. Note: Tally Ledger/Tally Stock
+Item/Tally Voucher don't themselves store which tenant they came from yet -
+callers must track and re-supply the same tenant consistently, since two
+tenants' Tally data could otherwise collide under the same ledger/item name.
 """
 
 import frappe
@@ -72,18 +79,19 @@ def create_sync_log(sync_type, operation, status, direction, entity_type, entity
 
 # ================== LEDGER SYNC ==================
 
-def sync_ledgers_from_tally(company=None, parent_group=None):
+def sync_ledgers_from_tally(tenant, company=None, parent_group=None):
 	"""
 	Sync all ledgers from Tally to Tally Ledger DocType
 
 	Args:
+		tenant: Customer record identifying which client's Tally to read from
 		company: Tally company name (optional)
 		parent_group: Filter by parent group (optional)
 
 	Returns:
 		dict: Sync statistics
 	"""
-	frappe.logger("tally_sync").info(f"[{now()}] sync_ledgers_from_tally started - company: {company}, parent_group: {parent_group}")
+	frappe.logger("tally_sync").info(f"[{now()}] sync_ledgers_from_tally started - tenant: {tenant}, company: {company}, parent_group: {parent_group}")
 
 	created = 0
 	updated = 0
@@ -91,7 +99,7 @@ def sync_ledgers_from_tally(company=None, parent_group=None):
 
 	try:
 		frappe.logger("tally_sync").info(f"[{now()}] Initializing TallyClient...")
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		frappe.logger("tally_sync").info(f"[{now()}] TallyClient initialized, fetching ledgers...")
 		ledgers = client.get_ledgers(company=company)
 		frappe.logger("tally_sync").info(f"[{now()}] Fetched {len(ledgers) if ledgers else 0} ledgers from Tally")
@@ -182,12 +190,13 @@ def sync_ledgers_from_tally(company=None, parent_group=None):
 	return {"created": created, "updated": updated, "failed": failed, "total": created + updated + failed}
 
 
-def sync_ledger_to_tally(ledger_name, operation="create"):
+def sync_ledger_to_tally(ledger_name, tenant, operation="create"):
 	"""
 	Sync a Tally Ledger from ERP to Tally
 
 	Args:
 		ledger_name: Name of the Tally Ledger document
+		tenant: Customer record identifying which client's Tally to push to
 		operation: create/update
 
 	Returns:
@@ -195,7 +204,7 @@ def sync_ledger_to_tally(ledger_name, operation="create"):
 	"""
 	try:
 		ledger = frappe.get_doc("Tally Ledger", ledger_name)
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 
 		ledger_data = {
 			"name": ledger.ledger_name,
@@ -248,17 +257,18 @@ def sync_ledger_to_tally(ledger_name, operation="create"):
 
 # ================== STOCK ITEM SYNC ==================
 
-def sync_stock_items_from_tally(company=None):
+def sync_stock_items_from_tally(tenant, company=None):
 	"""
 	Sync all stock items from Tally to Tally Stock Item DocType
 
 	Args:
+		tenant: Customer record identifying which client's Tally to read from
 		company: Tally company name (optional)
 
 	Returns:
 		dict: Sync statistics
 	"""
-	frappe.logger("tally_sync").info(f"[{now()}] sync_stock_items_from_tally started - company: {company}")
+	frappe.logger("tally_sync").info(f"[{now()}] sync_stock_items_from_tally started - tenant: {tenant}, company: {company}")
 
 	created = 0
 	updated = 0
@@ -266,7 +276,7 @@ def sync_stock_items_from_tally(company=None):
 
 	try:
 		frappe.logger("tally_sync").info(f"[{now()}] Initializing TallyClient...")
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		frappe.logger("tally_sync").info(f"[{now()}] TallyClient initialized, fetching stock items...")
 		items = client.get_stock_items(company=company)
 		frappe.logger("tally_sync").info(f"[{now()}] Fetched {len(items) if items else 0} stock items from Tally")
@@ -358,12 +368,13 @@ def sync_stock_items_from_tally(company=None):
 	return {"created": created, "updated": updated, "failed": failed, "total": created + updated + failed}
 
 
-def sync_stock_item_to_tally(item_name, operation="create"):
+def sync_stock_item_to_tally(item_name, tenant, operation="create"):
 	"""
 	Sync a Tally Stock Item from ERP to Tally
 
 	Args:
 		item_name: Name of the Tally Stock Item document
+		tenant: Customer record identifying which client's Tally to push to
 		operation: create/update
 
 	Returns:
@@ -371,7 +382,7 @@ def sync_stock_item_to_tally(item_name, operation="create"):
 	"""
 	try:
 		item = frappe.get_doc("Tally Stock Item", item_name)
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 
 		item_data = {
 			"name": item.item_name,
@@ -421,11 +432,12 @@ def sync_stock_item_to_tally(item_name, operation="create"):
 
 # ================== VOUCHER SYNC ==================
 
-def sync_vouchers_from_tally(voucher_type=None, from_date=None, to_date=None):
+def sync_vouchers_from_tally(tenant, voucher_type=None, from_date=None, to_date=None):
 	"""
 	Sync vouchers from Tally to Tally Voucher DocType
 
 	Args:
+		tenant: Customer record identifying which client's Tally to read from
 		voucher_type: Type of voucher (optional)
 		from_date: Start date (optional)
 		to_date: End date (optional)
@@ -433,7 +445,7 @@ def sync_vouchers_from_tally(voucher_type=None, from_date=None, to_date=None):
 	Returns:
 		dict: Sync statistics
 	"""
-	frappe.logger("tally_sync").info(f"[{now()}] sync_vouchers_from_tally started - voucher_type: {voucher_type}, from_date: {from_date}, to_date: {to_date}")
+	frappe.logger("tally_sync").info(f"[{now()}] sync_vouchers_from_tally started - tenant: {tenant}, voucher_type: {voucher_type}, from_date: {from_date}, to_date: {to_date}")
 
 	created = 0
 	updated = 0
@@ -441,7 +453,7 @@ def sync_vouchers_from_tally(voucher_type=None, from_date=None, to_date=None):
 
 	try:
 		frappe.logger("tally_sync").info(f"[{now()}] Initializing TallyClient...")
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 		frappe.logger("tally_sync").info(f"[{now()}] TallyClient initialized, fetching vouchers...")
 		vouchers = client.get_vouchers(
 			voucher_type=voucher_type,
@@ -541,12 +553,13 @@ def sync_vouchers_from_tally(voucher_type=None, from_date=None, to_date=None):
 	return {"created": created, "updated": updated, "failed": failed, "total": created + updated + failed}
 
 
-def sync_voucher_to_tally(voucher_name, operation="create"):
+def sync_voucher_to_tally(voucher_name, tenant, operation="create"):
 	"""
 	Sync a Tally Voucher from ERP to Tally
 
 	Args:
 		voucher_name: Name of the Tally Voucher document
+		tenant: Customer record identifying which client's Tally to push to
 		operation: create/update
 
 	Returns:
@@ -554,7 +567,7 @@ def sync_voucher_to_tally(voucher_name, operation="create"):
 	"""
 	try:
 		voucher = frappe.get_doc("Tally Voucher", voucher_name)
-		client = TallyClient()
+		client = TallyClient(customer=tenant)
 
 		# Prepare ledger entries
 		ledger_entries = []
@@ -653,18 +666,18 @@ def cancel_voucher_in_tally(voucher_name):
 # ================== API ENDPOINTS ==================
 
 @frappe.whitelist()
-def sync_all_ledgers(company=None, parent_group=None):
+def sync_all_ledgers(tenant, company=None, parent_group=None):
 	"""API endpoint to sync ledgers from Tally"""
-	return sync_ledgers_from_tally(company=company, parent_group=parent_group)
+	return sync_ledgers_from_tally(tenant, company=company, parent_group=parent_group)
 
 
 @frappe.whitelist()
-def sync_all_stock_items(company=None):
+def sync_all_stock_items(tenant, company=None):
 	"""API endpoint to sync stock items from Tally"""
-	return sync_stock_items_from_tally(company=company)
+	return sync_stock_items_from_tally(tenant, company=company)
 
 
 @frappe.whitelist()
-def sync_all_vouchers(voucher_type=None, from_date=None, to_date=None):
+def sync_all_vouchers(tenant, voucher_type=None, from_date=None, to_date=None):
 	"""API endpoint to sync vouchers from Tally"""
-	return sync_vouchers_from_tally(voucher_type=voucher_type, from_date=from_date, to_date=to_date)
+	return sync_vouchers_from_tally(tenant, voucher_type=voucher_type, from_date=from_date, to_date=to_date)

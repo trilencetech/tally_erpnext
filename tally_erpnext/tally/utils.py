@@ -3,6 +3,14 @@ Tally Integration Utilities
 
 This module provides utility functions for data mapping and synchronization
 between ERPNext and Tally.
+
+tally_erpnext is a central connector shared by every client - every function
+here takes a `tenant` argument: the Customer record that identifies *which
+client* (and therefore which TallyBridge agent/API key, see Tally Settings
+and apps/tally_erpnext/TALLYBRIDGE.md) a call is for. This is distinct from
+the ERPNext "Customer" doctype records these functions sync *as data* (a
+client's own Sundry Debtors) - same doctype, different meaning; don't confuse
+the two.
 """
 
 import frappe
@@ -10,27 +18,34 @@ from frappe import _
 from tally_erpnext.tally.client import TallyClient
 
 
-def get_tally_client():
+def get_tally_client(tenant):
 	"""
-	Get a configured TallyClient instance
+	Get a configured TallyClient instance for one tenant (client)
+
+	Args:
+		tenant: Customer record identifying the client
 
 	Returns:
 		TallyClient: Configured Tally client
 	"""
-	return TallyClient()
+	return TallyClient(customer=tenant)
 
 
-def sync_customers():
+def sync_customers(tenant):
 	"""
 	Sync customers from Tally to ERPNext
 
 	This function fetches ledgers from Tally under "Sundry Debtors" group
-	and creates/updates corresponding Customer records in ERPNext.
+	and creates/updates corresponding Customer records in ERPNext - these are
+	`tenant`'s own debtors, not other tally_erpnext clients.
+
+	Args:
+		tenant: Customer record identifying the client whose Tally this reads from
 
 	Returns:
 		dict: Sync results with counts
 	"""
-	client = get_tally_client()
+	client = get_tally_client(tenant)
 	ledgers = client.get_ledgers()
 
 	created = 0
@@ -94,17 +109,20 @@ def sync_customers():
 	}
 
 
-def sync_items():
+def sync_items(tenant):
 	"""
 	Sync stock items from Tally to ERPNext
 
 	This function fetches stock items from Tally and creates/updates
 	corresponding Item records in ERPNext.
 
+	Args:
+		tenant: Customer record identifying the client whose Tally this reads from
+
 	Returns:
 		dict: Sync results with counts
 	"""
-	client = get_tally_client()
+	client = get_tally_client(tenant)
 	stock_items = client.get_stock_items()
 
 	created = 0
@@ -159,17 +177,20 @@ def sync_items():
 	}
 
 
-def push_sales_invoice(sales_invoice_name):
+def push_sales_invoice(sales_invoice_name, tenant):
 	"""
 	Push a Sales Invoice from ERPNext to Tally as a Sales Voucher
 
 	Args:
 		sales_invoice_name: Name of the Sales Invoice document
+		tenant: Customer record identifying which client's Tally to push to -
+			there's no automatic way to infer this from the invoice alone, so
+			the caller must supply it (e.g. from a Company -> tenant mapping)
 
 	Returns:
 		dict: Push result
 	"""
-	client = get_tally_client()
+	client = get_tally_client(tenant)
 
 	# Get Sales Invoice document
 	si = frappe.get_doc("Sales Invoice", sales_invoice_name)
@@ -266,17 +287,18 @@ def map_erpnext_item_to_tally_stock_item(item_code):
 	}
 
 
-def create_customer_in_tally(customer_name):
+def create_customer_in_tally(customer_name, tenant):
 	"""
-	Create a customer in Tally from ERPNext Customer
+	Create a customer (debtor ledger) in Tally from an ERPNext Customer
 
 	Args:
-		customer_name: Name of the Customer document
+		customer_name: Name of the Customer document (the debtor)
+		tenant: Customer record identifying which client's Tally to create it in
 
 	Returns:
 		dict: Creation response
 	"""
-	client = get_tally_client()
+	client = get_tally_client(tenant)
 	ledger_data = map_erpnext_customer_to_tally_ledger(customer_name)
 
 	response = client.create_ledger(**ledger_data)
@@ -288,17 +310,18 @@ def create_customer_in_tally(customer_name):
 	return response
 
 
-def create_item_in_tally(item_code):
+def create_item_in_tally(item_code, tenant):
 	"""
 	Create an item in Tally from ERPNext Item
 
 	Args:
 		item_code: Item code in ERPNext
+		tenant: Customer record identifying which client's Tally to create it in
 
 	Returns:
 		dict: Creation response
 	"""
-	client = get_tally_client()
+	client = get_tally_client(tenant)
 	item_data = map_erpnext_item_to_tally_stock_item(item_code)
 
 	response = client.create_stock_item(**item_data)
@@ -310,26 +333,32 @@ def create_item_in_tally(item_code):
 	return response
 
 
-def is_tally_enabled():
+def is_tally_enabled(tenant):
 	"""
-	Check if Tally integration is enabled
+	Check if Tally integration is enabled for one tenant (client)
+
+	Args:
+		tenant: Customer record identifying the client
 
 	Returns:
 		bool: True if enabled, False otherwise
 	"""
-	settings = TallyClient.get_tally_settings()
+	settings = TallyClient.get_tally_settings(tenant)
 	return settings.get("enabled", False)
 
 
-def validate_tally_connection():
+def validate_tally_connection(tenant):
 	"""
-	Validate connection to Tally server
+	Validate connection to one tenant's Tally server
+
+	Args:
+		tenant: Customer record identifying the client
 
 	Returns:
 		tuple: (is_valid, message)
 	"""
 	try:
-		client = get_tally_client()
+		client = get_tally_client(tenant)
 		if client.test_connection():
 			return True, _("Connection successful")
 		else:

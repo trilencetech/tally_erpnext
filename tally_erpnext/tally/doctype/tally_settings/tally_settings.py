@@ -11,11 +11,18 @@ class TallySettings(Document):
 
 	def validate(self):
 		"""Validate Tally settings"""
-		if self.enabled:
+		if not self.enabled:
+			return
+		if self.connection_mode == "Direct (Same Network)":
 			if not self.host:
 				frappe.throw(_("Tally Server Host is required when Tally integration is enabled"))
 			if not self.port:
 				frappe.throw(_("Tally Server Port is required when Tally integration is enabled"))
+		else:
+			if not self.agent_id:
+				frappe.throw(_("Agent ID is required for Relay (TallyBridge) mode"))
+			if not self.api_key:
+				frappe.throw(_("API Key is required for Relay (TallyBridge) mode"))
 
 	def on_update(self):
 		"""Clear cache when settings are updated"""

@@ -46,6 +46,7 @@ class TallyVoucher(Document):
 				queue="short",
 				timeout=300,
 				voucher_name=self.name,
+				tenant=self.tenant,
 				operation="create"
 			)
 
