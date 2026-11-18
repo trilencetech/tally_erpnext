@@ -1786,7 +1786,7 @@ class TallyClient:
                               voucher_number=None, narration="", reference=None,
                               inventory_entries=None, party_name=None, party_gstin=None,
                               party_address=None, party_country="India", place_of_supply=None,
-                              gst_registration_type="Regular", action="Create", master_id=None):
+                              gst_registration_type="Regular", action="Create", master_id=None, remote_id=None):
         """
         Create (or, with action="Alter", update) a Sales voucher in Tally
         (VCHTYPE="Sales") - unlike
@@ -1833,11 +1833,17 @@ class TallyClient:
             action (str, optional): "Create" (default) or "Alter" to update an
                 existing voucher.
             master_id (str, optional): Tally's own internal voucher ID
-                (LASTVCHID from a prior create's response) - required for
-                action="Alter" to actually target that voucher. Matching by
-                VOUCHERTYPENAME + VOUCHERNUMBER alone does NOT work - Tally
-                creates a second, duplicate voucher with the same number
-                instead of updating the first one.
+                (LASTVCHID from a prior create's response) - sent as a
+                secondary hint alongside remote_id below.
+            remote_id (str, optional): Our own stable external key for this
+                voucher (e.g. the bill name) - sent as the REMOTEID
+                ATTRIBUTE on <VOUCHER>, Tally's own Sync-protocol mechanism
+                for an external system to track one object across Create and
+                every later Alter. NOT the same as a <GUID> child element
+                (that's Tally's own auto-generated internal field - it
+                ignores any value sent there, confirmed live). Pass the SAME
+                value on the original Create and on every later Alter for
+                that same voucher.
 
         Returns:
             str: XML response confirming creation/update
@@ -1971,6 +1977,13 @@ class TallyClient:
             if place_of_supply else ""
         )
         master_id_xml = f"<MASTERID>{master_id}</MASTERID>" if master_id else ""
+        # REMOTEID must be an ATTRIBUTE on <VOUCHER>, not a <GUID> child
+        # element - a <GUID> child is Tally's own auto-generated internal
+        # field (it ignores any value we send there, confirmed live), while
+        # REMOTEID is the attribute Tally's own Sync protocol uses for
+        # exactly this purpose: an external system's stable key for the
+        # SAME object across Create and every later Alter.
+        remote_id_attr = f' REMOTEID="{remote_id}"' if remote_id else ""
 
         xml_request = f"""<ENVELOPE>
     <HEADER>
@@ -1987,7 +2000,7 @@ class TallyClient:
             <REQUESTDATA>
                 {master_messages_xml}
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <VOUCHER VCHTYPE="Sales" ACTION="{action}">
+                    <VOUCHER VCHTYPE="Sales" ACTION="{action}"{remote_id_attr}>
                         {master_id_xml}
                         <DATE>{date}</DATE>
                         <EFFECTIVEDATE>{date}</EFFECTIVEDATE>
@@ -2071,17 +2084,23 @@ class TallyClient:
         
         return self._send_request(xml_request)
 
-    def cancel_voucher(self, company_name, master_id):
+    def cancel_voucher(self, company_name, master_id, remote_id=None, voucher_type="Sales"):
         """
-        Cancel a voucher in Tally using its master ID
-        
+        Cancel a voucher in Tally (ISCANCELLED=Yes) using its master ID (and,
+        where known, its real Tally-assigned GUID - MASTERID alone was found
+        unreliable for ACTION="Alter" matching, so it's included here too as
+        a hedge against the same issue affecting Cancel).
+
         Args:
             company_name (str): Name of the company
             master_id (str): Master ID of the voucher
-            
+            remote_id (str, optional): Tally's own GUID for the voucher
+            voucher_type (str, optional): VCHTYPE, default "Sales"
+
         Returns:
             str: XML response confirming cancellation
         """
+        guid_xml = f"<GUID>{remote_id}</GUID>" if remote_id else ""
         xml_request = f"""<ENVELOPE>
     <HEADER>
         <TALLYREQUEST>Import Data</TALLYREQUEST>
@@ -2096,15 +2115,16 @@ class TallyClient:
             </REQUESTDESC>
             <REQUESTDATA>
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <VOUCHER ACTION="Cancel">
+                    <VOUCHER VCHTYPE="{voucher_type}" ACTION="Cancel">
                         <MASTERID>{master_id}</MASTERID>
+                        {guid_xml}
                     </VOUCHER>
                 </TALLYMESSAGE>
             </REQUESTDATA>
         </IMPORTDATA>
     </BODY>
 </ENVELOPE>"""
-        
+
         return self._send_request(xml_request)
 
     # -------------------- Group Management --------------------

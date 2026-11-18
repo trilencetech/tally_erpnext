@@ -524,6 +524,7 @@ class TallyClient:
 			gst_registration_type = kwargs.get('gst_registration_type') or 'Regular'
 			action = kwargs.get('action') or 'Create'
 			master_id = kwargs.get('master_id')
+			remote_id = kwargs.get('remote_id')
 
 			if voucher_type.lower() == 'journal':
 				xml_response = self.client.create_journal_voucher(
@@ -569,7 +570,8 @@ class TallyClient:
 					place_of_supply=place_of_supply,
 					gst_registration_type=gst_registration_type,
 					action=action,
-					master_id=master_id
+					master_id=master_id,
+					remote_id=remote_id
 				)
 			else:
 				frappe.throw(_("Voucher type {0} not yet supported").format(voucher_type))
@@ -577,6 +579,28 @@ class TallyClient:
 			return self.client.parse_xml_response(xml_response)
 		except Exception as e:
 			frappe.throw(_("Failed to create voucher: {0}").format(str(e)))
+
+	def cancel_voucher(self, company_name, master_id, remote_id=None, voucher_type="Sales"):
+		"""
+		Cancel a voucher in Tally (ISCANCELLED=Yes)
+
+		Args:
+			company_name: Company name
+			master_id: Tally's internal voucher ID (MASTERID)
+			remote_id: Tally's own GUID for the voucher, if known
+			voucher_type: VCHTYPE, default "Sales"
+
+		Returns:
+			dict: Response from Tally
+		"""
+		try:
+			xml_response = self.client.cancel_voucher(
+				company_name=company_name, master_id=master_id,
+				remote_id=remote_id, voucher_type=voucher_type
+			)
+			return self.client.parse_xml_response(xml_response)
+		except Exception as e:
+			frappe.throw(_("Failed to cancel voucher: {0}").format(str(e)))
 
 	def get_groups(self, group_type="Ledger", company_name=None):
 		"""
